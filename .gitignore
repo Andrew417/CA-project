@@ -1,0 +1,8 @@
+work
+*.mti
+*.vpd
+*.wlf
+*.vcs.*
+*.mpf
+*.mpf_new
+

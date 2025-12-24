@@ -1,32 +1,55 @@
 /*************************************************
  * RAM MODULE
  *************************************************/
+/*************************************************
+ * RAM MODULE (Synchronous Read/Write, Parameterized)
+ * - Synchronous write: on posedge clk when writeEnable=1
+ * - Synchronous read : readData updates on posedge clk when readEnable=1
+ *
+ * Optional (NOT required by spec):
+ * - rst input clears output register only
+ * - initial block initializes memory to 0 for clean simulation
+ *************************************************/
 module ram #(
     parameter ADDR_WIDTH = 16,
     parameter DATA_WIDTH = 32
 )(
-    input clk, writeEnable, readEnable,
-    input [ADDR_WIDTH-1:0] addr, 
-    input [DATA_WIDTH-1:0] writeData,
-    output reg [DATA_WIDTH-1:0] readData
+    input   clk,
+    input   rst,          // OPTIONAL (not required)
+    input   writeEnable,
+    input   readEnable,
+    input   [ADDR_WIDTH-1:0]  addr,
+    input   [DATA_WIDTH-1:0]  writeData,
+    output reg [DATA_WIDTH-1:0]  readData
 );
 
+    // Depth derived from address width (2^ADDR_WIDTH)
     localparam DEPTH = (1 << ADDR_WIDTH);
+
+    // Memory array
     reg [DATA_WIDTH-1:0] mem [0:DEPTH-1];
 
-    // Initialize RAM to zero
+    // OPTIONAL: Initialize RAM to zero (simulation convenience)
     integer i;
     initial begin
         for (i = 0; i < DEPTH; i = i + 1)
-            mem[i] = 0; // ensures TEST 3 passes
+            mem[i] = {DATA_WIDTH{1'b0}};
+        readData = {DATA_WIDTH{1'b0}};
     end
 
     always @(posedge clk) begin
-        if (writeEnable)
-            mem[addr] <= writeData;
-        if (readEnable)
-            readData <= mem[addr];
+        if (rst) begin
+            // OPTIONAL: reset output register only
+            readData <= {DATA_WIDTH{1'b0}};
+        end else begin
+            if (writeEnable)
+                mem[addr] <= writeData;
+
+            if (readEnable)
+                readData <= mem[addr]; // read-first if read & write same cycle
+        end
     end
+
 endmodule
 
 /*************************************************

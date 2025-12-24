@@ -34,17 +34,14 @@ module tb_cache_system;
         .rdata(rdata)
     );
 
-    // ----------------------------------
-    // Clock (2 ns period)
-    // ----------------------------------
+
+    // ========== Clock (2 ns period) ===========   
     initial begin
         clk = 0;
         forever #1 clk = ~clk;
     end
 
-    // ----------------------------------
-    // Self-checking task (NO timing)
-    // ----------------------------------
+    // ========== Self-checking task (NO timing) ==========
     task check_output;
         input [31:0] expected;
         input [31:0] actual;
@@ -62,9 +59,7 @@ module tb_cache_system;
         end
     endtask
 
-    // ----------------------------------
-    // Write task (timing-safe)
-    // ----------------------------------
+    // ========== Write task (timing-safe) ==========   
     task write_op;
         input [15:0] a;
         input [31:0] d;
@@ -79,9 +74,7 @@ module tb_cache_system;
         end
     endtask
 
-    // ----------------------------------
-    // Read & check task (2-cycle latency)
-    // ----------------------------------
+    // ========== Read & check task (2-cycle latency) ==========
     task read_check;
         input [15:0] a;
         input [31:0] expected;
@@ -98,64 +91,48 @@ module tb_cache_system;
         end
     endtask
 
-    // ----------------------------------
-    // TEST SEQUENCE (MATCHES TEST PLAN)
-    // ----------------------------------
+    // ========== TEST Cases Start ==========
     initial begin
         // Init
-        rd = 0;
-        wr = 0;
-        addr = 0;
-        wdata = 0;
+        rd = 0; wr = 0; addr = 0; wdata = 0;
 
-        // --------------------------------------------------
         // SA-01: Cold miss (exercise only, no check)
-        // --------------------------------------------------
         $display("TESTCASE SA-01: Cold miss");
         @(negedge clk);
         addr = 16'h0004;
         rd = 1;
-        @(posedge clk);
-        @(posedge clk);
+        @(negedge clk);
         rd = 0;
+        repeat(2) @(posedge clk);
+        rdata_expected = 32'h00000000;
+        check_output(rdata_expected, rdata); // RAM default 0
 
-        // --------------------------------------------------
-        // SA-02: Write then read hit
-        // --------------------------------------------------
+        // =========== SA-02: Write then read hit ===========
         $display("TESTCASE SA-02: Way fill");
         write_op(16'h0004, 32'h1111AAAA);
         read_check(16'h0004, 32'h1111AAAA);
 
-        // --------------------------------------------------
-        // SA-02: Fill all 4 ways (same set)
-        // --------------------------------------------------
+        // ============ SA-02: Fill all 4 ways (same set)============
         $display("TESTCASE SA-02: Way fill (fill all 4 ways)");
-        write_op(16'h0004, 32'hAAAA0001);
-        write_op(16'h0404, 32'hAAAA0002);
-        write_op(16'h0804, 32'hAAAA0003);
-        write_op(16'h0C04, 32'hAAAA0004);
+        write_op(16'h0004, 32'hAAAA0001); 
+        write_op(16'h0404, 32'hAAAA0002); 
+        write_op(16'h0804, 32'hAAAA0003); 
+        write_op(16'h0C04, 32'hAAAA0004); 
 
         // Round-robin LRU → last written way is most recent
         read_check(16'h0C04, 32'hAAAA0004);
 
-        // --------------------------------------------------
-        // SA-03: LRU eviction (round-robin)
-        // --------------------------------------------------
+        // =========== SA-03: LRU eviction (round-robin) ===========
         $display("TESTCASE SA-03: LRU eviction");
         write_op(16'h1004, 32'hAAAA0005);
 
         // The new line should be present
         read_check(16'h1004, 32'hAAAA0005);
 
-        // --------------------------------------------------
         // SA-07: Read after eviction (clean line → RAM still 0)
-        // --------------------------------------------------
-        $display("TESTCASE SA-07: Cross-set access");
         read_check(16'h0004, 32'h1111AAAA);
 
-        // --------------------------------------------------
-        // SA-09: Address boundary test
-        // --------------------------------------------------
+        // =========== SA-09: Address boundary test ===========
         $display("TESTCASE SA-09: Address boundary");
         write_op(16'hFFFF, 32'hDEADBEEF);
         read_check(16'hFFFF, 32'hDEADBEEF);

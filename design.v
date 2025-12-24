@@ -219,97 +219,370 @@ endmodule
 /*************************************************
  * CACHE CONTROLLER MODULE
  *************************************************/
+/*************************************************
+ * SIMPLE CACHE CONTROLLER (Verilog-2001)
+ * - Works with your exact ram + cache modules
+ * - 1-word line cache (DATA_WIDTH bits)
+ *
+ * CPU protocol:
+ *  - cpuRead or cpuWrite asserted for a request
+ *  - Controller deasserts ready while busy
+ *  - CPU should hold addr/writeData stable until ready==1 and done pulses
+ *
+ * Mandatory:
+ *  - write-through supported (default WRITE_BACK=0)
+ *
+ * Bonus:
+ *  - LRU replacement (uses cache victimWay + lruAccess updates)
+ *  - write-back supported when WRITE_BACK=1
+ *************************************************/
 module cache_controller #(
-    parameter ADDR_WIDTH = 16,
-    parameter DATA_WIDTH = 32,
-    parameter NUM_SETS   = 64,
-    parameter NUM_WAYS   = 4
+    parameter integer ADDR_WIDTH   = 16,
+    parameter integer DATA_WIDTH   = 32,
+    parameter integer NUM_SETS     = 64,
+    parameter integer NUM_WAYS     = 4,
+
+    // Pure Verilog: provide these explicitly
+    parameter integer SET_INDEX_W  = 6,   // log2(NUM_SETS)
+    parameter integer WAY_INDEX_W  = 2,   // log2(NUM_WAYS)
+
+    // Address split:
+    // word addressing: OFFSET_W=0, TAG_WIDTH=ADDR_WIDTH-SET_INDEX_W
+    // byte addressing (32-bit word): OFFSET_W=2, TAG_WIDTH=ADDR_WIDTH-SET_INDEX_W-2
+    parameter integer OFFSET_W     = 0,
+    parameter integer TAG_WIDTH    = 10,
+
+    // 0 = write-through (MANDATORY behavior)
+    // 1 = write-back (BONUS behavior)
+    parameter integer WRITE_BACK   = 0
 )(
-    input                  clk,
-    input                  rd,
-    input                  wr,
-    input [ADDR_WIDTH-1:0] addr,
-    input [DATA_WIDTH-1:0] wdata,
-    output [DATA_WIDTH-1:0] rdata
+    input  wire                   clk,
+    input  wire                   rst,
+
+    // ===== CPU Interface =====
+    input  wire                   cpuRead,
+    input  wire                   cpuWrite,
+    input  wire [ADDR_WIDTH-1:0]  cpuAddr,
+    input  wire [DATA_WIDTH-1:0]  cpuWriteData,
+    output reg  [DATA_WIDTH-1:0]  cpuReadData,
+    output reg                    done,
+    output wire                   ready,
+
+    // ===== Cache Interface =====
+    output reg  [SET_INDEX_W-1:0] rdSet,
+    input  wire [NUM_WAYS*TAG_WIDTH-1:0]   rdTags,
+    input  wire [NUM_WAYS*DATA_WIDTH-1:0]  rdData,
+    input  wire [NUM_WAYS-1:0]             rdValid,
+    input  wire [NUM_WAYS-1:0]             rdDirty,
+
+    output reg                    lineWriteEn,
+    output reg  [SET_INDEX_W-1:0] lineWriteSet,
+    output reg  [WAY_INDEX_W-1:0] lineWriteWay,
+    output reg  [TAG_WIDTH-1:0]   lineWriteTag,
+    output reg  [DATA_WIDTH-1:0]  lineWriteData,
+    output reg                    lineWriteValid,
+    output reg                    lineWriteDirty,
+
+    output reg                    lruAccessEn,
+    output reg  [SET_INDEX_W-1:0] lruAccessSet,
+    output reg  [WAY_INDEX_W-1:0] lruAccessWay,
+
+    output reg  [SET_INDEX_W-1:0] victimSet,
+    input  wire [WAY_INDEX_W-1:0] victimWay,
+
+    // ===== RAM Interface =====
+    output reg                    ramWriteEnable,
+    output reg                    ramReadEnable,
+    output reg  [ADDR_WIDTH-1:0]  ramAddr,
+    output reg  [DATA_WIDTH-1:0]  ramWriteData,
+    input  wire [DATA_WIDTH-1:0]  ramReadData
 );
 
-    // localparam INDEX_BITS = $clog2(NUM_SETS);
-    localparam INDEX_BITS = (NUM_SETS > 1) ? $clog2(NUM_SETS) : 1;
-    localparam TAG_BITS   = ADDR_WIDTH - INDEX_BITS;
-    localparam WAY_BITS   = ($clog2(NUM_WAYS) > 0) ? $clog2(NUM_WAYS) : 1;
+    // ---------------------------------------------
+    // FSM states
+    // ---------------------------------------------
+    localparam S_IDLE   = 3'd0;
+    localparam S_LOOKUP = 3'd1;
+    localparam S_WB     = 3'd2;
+    localparam S_RAMRD  = 3'd3;
+    localparam S_FILL   = 3'd4;
 
-    // wire [INDEX_BITS-1:0] index = addr[INDEX_BITS-1:0];
-    wire [INDEX_BITS-1:0] index = (NUM_SETS > 1) ? addr[INDEX_BITS-1:0] : 0;
-    wire [TAG_BITS-1:0]   tag   = addr[ADDR_WIDTH-1:INDEX_BITS];
+    reg [2:0] state, next_state;
 
-    wire hit;
-    wire dirty;
-    wire [DATA_WIDTH-1:0] cache_data;
-    wire [WAY_BITS-1:0] hit_way;
-    wire [TAG_BITS-1:0] old_tag;
+    assign ready = (state == S_IDLE);
 
-    reg cache_we;
-    reg cache_fill;
-    reg ram_we;
-    reg ram_re;
+    // ---------------------------------------------
+    // Latched request
+    // ---------------------------------------------
+    reg [ADDR_WIDTH-1:0] reqAddr;
+    reg [DATA_WIDTH-1:0] reqWdata;
+    reg                  reqRe, reqWe;
 
-    wire [DATA_WIDTH-1:0] ram_data;
-    wire [DATA_WIDTH-1:0] ram_wdata;
-    wire [ADDR_WIDTH-1:0] wb_addr;
-    
-    assign ram_wdata = ram_we ? cache_data : wdata;
-    assign wb_addr = (NUM_SETS > 1) ? {old_tag, index} : old_tag;
+    wire [SET_INDEX_W-1:0] reqSet = reqAddr[OFFSET_W + SET_INDEX_W - 1 : OFFSET_W];
+    wire [TAG_WIDTH-1:0]   reqTag = reqAddr[ADDR_WIDTH-1 : OFFSET_W + SET_INDEX_W];
 
-    cache c0 (
-        .clk(clk),
-        .we(cache_we),
-        .fill(cache_fill),
-        .index(index),
-        .tag_in(tag),
-        .data_in(wdata),
-        .hit(hit),
-        .data_out(cache_data),
-        .hit_way(hit_way),
-        .dirty_out(dirty),
-        .tag_out(old_tag)
-    );
+    // ---------------------------------------------
+    // Helpers: indexed part-select (Verilog-2001)
+    // ---------------------------------------------
+    function [TAG_WIDTH-1:0] GET_TAG_I;
+        input integer wi;
+        begin
+            GET_TAG_I = rdTags[wi*TAG_WIDTH +: TAG_WIDTH];
+        end
+    endfunction
 
-    ram r0 (
-        .clk(clk),
-        .writeEnable(ram_we),
-        .readEnable(ram_re),
-        .addr(ram_we ? wb_addr : addr),
-        .writeData(ram_wdata),
-        .readData(ram_data)
-    );
+    function [DATA_WIDTH-1:0] GET_DATA_I;
+        input integer wi;
+        begin
+            GET_DATA_I = rdData[wi*DATA_WIDTH +: DATA_WIDTH];
+        end
+    endfunction
 
-    assign rdata = hit ? cache_data : ram_data;
+    // ---------------------------------------------
+    // Hit detect + invalid-first replacement
+    // ---------------------------------------------
+    integer i;
 
-    always @(posedge clk) begin
-        cache_we   <= 0;
-        cache_fill <= 0;
-        ram_we     <= 0;
-        ram_re     <= 0;
+    reg hit;
+    reg [WAY_INDEX_W-1:0] hitWay;
+    reg [DATA_WIDTH-1:0]  hitData;
 
-        if (rd) begin
-            if (!hit) begin
-                if (dirty)
-                    ram_we <= 1;   // write-back
-                ram_re     <= 1;   // fetch from RAM
-                cache_fill <= 1;   // fill cache
+    reg foundInvalid;
+    reg [WAY_INDEX_W-1:0] invalidWay;
+
+    reg [WAY_INDEX_W-1:0] replWay_c;   // combinational replacement way
+
+    always @(*) begin
+        hit          = 1'b0;
+        hitWay       = {WAY_INDEX_W{1'b0}};
+        hitData      = {DATA_WIDTH{1'b0}};
+        foundInvalid = 1'b0;
+        invalidWay   = {WAY_INDEX_W{1'b0}};
+
+        for (i = 0; i < NUM_WAYS; i = i + 1) begin
+            if (!foundInvalid && !rdValid[i]) begin
+                foundInvalid = 1'b1;
+                invalidWay   = i[WAY_INDEX_W-1:0];
+            end
+
+            if (rdValid[i] && (GET_TAG_I(i) == reqTag)) begin
+                hit     = 1'b1;
+                hitWay  = i[WAY_INDEX_W-1:0];
+                hitData = GET_DATA_I(i);
             end
         end
 
-        if (wr) begin
-            if (hit) begin
-                cache_we <= 1;     // write hit
-            end else begin
-                if (dirty)
-                    ram_we <= 1;   // write-back
-                ram_re     <= 1;
-                cache_fill <= 1;
-                cache_we   <= 1;   // write new data
+        replWay_c = foundInvalid ? invalidWay : victimWay; // invalid-first else LRU victim
+    end
+
+    // *** FIX: combinational WB need based on current victim choice ***
+    wire victim_need_wb;
+    assign victim_need_wb = (WRITE_BACK != 0) && rdValid[replWay_c] && rdDirty[replWay_c];
+
+    // ---------------------------------------------
+    // Victim snapshot regs for write-back path
+    // ---------------------------------------------
+    reg [WAY_INDEX_W-1:0] replWay_r;
+    reg                   victimValid_r, victimDirty_r;
+    reg [TAG_WIDTH-1:0]    victimTag_r;
+    reg [DATA_WIDTH-1:0]   victimData_r;
+
+    wire [ADDR_WIDTH-1:0] victimAddr = { victimTag_r, reqSet, {OFFSET_W{1'b0}} };
+
+    // ---------------------------------------------
+    // Next-state logic
+    // ---------------------------------------------
+    always @(*) begin
+        next_state = state;
+
+        case (state)
+            S_IDLE: begin
+                if (cpuRead || cpuWrite)
+                    next_state = S_LOOKUP;
+            end
+
+            S_LOOKUP: begin
+                if (hit) begin
+                    next_state = S_IDLE;
+                end else begin
+                    // *** FIX: use victim_need_wb (current) instead of victim*_r (stale) ***
+                    if (victim_need_wb)
+                        next_state = S_WB;
+                    else if (reqRe)
+                        next_state = S_RAMRD;
+                    else
+                        next_state = S_FILL; // write miss allocate
+                end
+            end
+
+            S_WB: begin
+                if (reqRe) next_state = S_RAMRD;
+                else       next_state = S_FILL;
+            end
+
+            S_RAMRD: begin
+                next_state = S_FILL; // RAM data available next clock
+            end
+
+            S_FILL: begin
+                next_state = S_IDLE;
+            end
+
+            default: next_state = S_IDLE;
+        endcase
+    end
+
+    // ---------------------------------------------
+    // OUTPUTS: single-driver combinational block
+    // ---------------------------------------------
+    always @(*) begin
+        // defaults
+        rdSet           = reqSet;
+        victimSet       = reqSet;
+
+        lineWriteEn     = 1'b0;
+        lineWriteSet    = reqSet;
+        lineWriteWay    = replWay_r;
+        lineWriteTag    = reqTag;
+        lineWriteData   = {DATA_WIDTH{1'b0}};
+        lineWriteValid  = 1'b1;
+        lineWriteDirty  = 1'b0;
+
+        lruAccessEn     = 1'b0;
+        lruAccessSet    = reqSet;
+        lruAccessWay    = replWay_r;
+
+        ramWriteEnable  = 1'b0;
+        ramReadEnable   = 1'b0;
+        ramAddr         = reqAddr;
+        ramWriteData    = reqWdata;
+
+        case (state)
+            S_LOOKUP: begin
+                if (hit) begin
+                    // LRU update on hit
+                    lruAccessEn  = 1'b1;
+                    lruAccessWay = hitWay;
+
+                    if (reqWe) begin
+                        // Update cache line on write hit
+                        lineWriteEn    = 1'b1;
+                        lineWriteSet   = reqSet;
+                        lineWriteWay   = hitWay;
+                        lineWriteTag   = reqTag;
+                        lineWriteData  = reqWdata;
+                        lineWriteValid = 1'b1;
+                        lineWriteDirty = (WRITE_BACK ? 1'b1 : 1'b0);
+
+                        // Mandatory write-through when not write-back
+                        if (!WRITE_BACK) begin
+                            ramWriteEnable = 1'b1;
+                            ramAddr        = reqAddr;
+                            ramWriteData   = reqWdata;
+                        end
+                    end
+                end
+            end
+
+            S_WB: begin
+                // Write back dirty victim line
+                ramWriteEnable = 1'b1;
+                ramAddr        = victimAddr;
+                ramWriteData   = victimData_r;
+            end
+
+            S_RAMRD: begin
+                // Start RAM read for missed address
+                ramReadEnable  = 1'b1;
+                ramAddr        = reqAddr;
+            end
+
+            S_FILL: begin
+                // Fill cache on miss (from RAM on read miss, or from CPU data on write miss)
+                lineWriteEn    = 1'b1;
+                lineWriteSet   = reqSet;
+                lineWriteWay   = replWay_r;
+                lineWriteTag   = reqTag;
+                lineWriteValid = 1'b1;
+
+                if (reqRe) begin
+                    lineWriteData  = ramReadData;
+                    lineWriteDirty = 1'b0;
+                end else begin
+                    lineWriteData  = reqWdata;
+                    lineWriteDirty = (WRITE_BACK ? 1'b1 : 1'b0);
+
+                    // write-through on write miss if not write-back
+                    if (!WRITE_BACK) begin
+                        ramWriteEnable = 1'b1;
+                        ramAddr        = reqAddr;
+                        ramWriteData   = reqWdata;
+                    end
+                end
+
+                // LRU update on fill
+                lruAccessEn  = 1'b1;
+                lruAccessWay = replWay_r;
+            end
+        endcase
+    end
+
+    // ---------------------------------------------
+    // SEQUENTIAL: state + latching + done/data
+    // ---------------------------------------------
+    always @(posedge clk) begin
+        if (rst) begin
+            state <= S_IDLE;
+
+            reqAddr  <= {ADDR_WIDTH{1'b0}};
+            reqWdata <= {DATA_WIDTH{1'b0}};
+            reqRe    <= 1'b0;
+            reqWe    <= 1'b0;
+
+            replWay_r      <= {WAY_INDEX_W{1'b0}};
+            victimValid_r  <= 1'b0;
+            victimDirty_r  <= 1'b0;
+            victimTag_r    <= {TAG_WIDTH{1'b0}};
+            victimData_r   <= {DATA_WIDTH{1'b0}};
+
+            cpuReadData <= {DATA_WIDTH{1'b0}};
+            done        <= 1'b0;
+        end else begin
+            state <= next_state;
+            done  <= 1'b0; // pulse
+
+            // Accept new request only in IDLE
+            if (state == S_IDLE) begin
+                if (cpuRead || cpuWrite) begin
+                    reqAddr  <= cpuAddr;
+                    reqWdata <= cpuWriteData;
+                    reqRe    <= cpuRead;
+                    reqWe    <= cpuWrite;
+                end
+            end
+
+            // In LOOKUP on miss: snapshot replacement choice and victim line for WB
+            if (state == S_LOOKUP && !hit) begin
+                replWay_r     <= replWay_c;
+
+                victimValid_r <= rdValid[replWay_c];
+                victimDirty_r <= rdDirty[replWay_c];
+                victimTag_r   <= rdTags[replWay_c*TAG_WIDTH +: TAG_WIDTH];
+                victimData_r  <= rdData[replWay_c*DATA_WIDTH +: DATA_WIDTH];
+            end
+
+            // Complete on hit in LOOKUP
+            if (state == S_LOOKUP && hit) begin
+                if (reqRe) cpuReadData <= hitData;
+                done <= 1'b1;
+            end
+
+            // Complete on fill (miss path)
+            if (state == S_FILL) begin
+                if (reqRe) cpuReadData <= ramReadData;
+                done <= 1'b1;
             end
         end
     end
+
 endmodule

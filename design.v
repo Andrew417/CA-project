@@ -586,3 +586,193 @@ module cache_controller #(
     end
 
 endmodule
+
+/*************************************************
+ * TOP MODULE: cache_system
+ *
+ * Instantiates:
+ *  - ram
+ *  - cache
+ *  - cache_controller
+ *
+ * Notes:
+ *  - This top assumes WORD-ADDRESSED memory by default:
+ *      OFFSET_W = 0
+ *      NUM_SETS = 64  => SET_INDEX_W = 6
+ *      TAG_WIDTH = 16 - 6 = 10
+ *
+ *  - If your testbench uses BYTE addresses, tell me and I’ll provide the
+ *    byte-addressing variant (OFFSET_W=2, TAG_WIDTH=8, plus address translation).
+ *************************************************/
+module cache_system #(
+    parameter integer ADDR_WIDTH   = 16,
+    parameter integer DATA_WIDTH   = 32,
+
+    parameter integer NUM_WAYS     = 4,
+    parameter integer NUM_SETS     = 64,   // 256 total lines / 4 ways = 64 sets
+
+    // For word addressing:
+    parameter integer OFFSET_W     = 0,
+    parameter integer SET_INDEX_W  = 6,    // log2(64)
+    parameter integer WAY_INDEX_W  = 2,    // log2(4)
+    parameter integer TAG_WIDTH    = 10,   // 16 - 6 - 0
+
+    // 0 = write-through (mandatory default)
+    // 1 = write-back (bonus)
+    parameter integer WRITE_BACK   = 0
+)(
+    input  wire                   clk,
+    input  wire                   rst,
+
+    // CPU interface to the whole system
+    input  wire                   cpuRead,
+    input  wire                   cpuWrite,
+    input  wire [ADDR_WIDTH-1:0]  cpuAddr,
+    input  wire [DATA_WIDTH-1:0]  cpuWriteData,
+    output wire [DATA_WIDTH-1:0]  cpuReadData,
+    output wire                   done,
+    output wire                   ready
+);
+
+    // -----------------------------
+    // Wires: controller <-> cache
+    // -----------------------------
+    wire [SET_INDEX_W-1:0]                 rdSet;
+    wire [NUM_WAYS*TAG_WIDTH-1:0]          rdTags;
+    wire [NUM_WAYS*DATA_WIDTH-1:0]         rdData;
+    wire [NUM_WAYS-1:0]                    rdValid;
+    wire [NUM_WAYS-1:0]                    rdDirty;
+
+    wire                                  lineWriteEn;
+    wire [SET_INDEX_W-1:0]                lineWriteSet;
+    wire [WAY_INDEX_W-1:0]                lineWriteWay;
+    wire [TAG_WIDTH-1:0]                  lineWriteTag;
+    wire [DATA_WIDTH-1:0]                 lineWriteData;
+    wire                                  lineWriteValid;
+    wire                                  lineWriteDirty;
+
+    wire                                  lruAccessEn;
+    wire [SET_INDEX_W-1:0]                lruAccessSet;
+    wire [WAY_INDEX_W-1:0]                lruAccessWay;
+
+    wire [SET_INDEX_W-1:0]                victimSet;
+    wire [WAY_INDEX_W-1:0]                victimWay;
+
+    // -----------------------------
+    // Wires: controller <-> ram
+    // -----------------------------
+    wire                                  ramWriteEnable;
+    wire                                  ramReadEnable;
+    wire [ADDR_WIDTH-1:0]                 ramAddr;
+    wire [DATA_WIDTH-1:0]                 ramWriteData;
+    wire [DATA_WIDTH-1:0]                 ramReadData;
+
+    // -----------------------------
+    // Instantiate RAM
+    // -----------------------------
+    ram #(
+        .ADDR_WIDTH(ADDR_WIDTH),
+        .DATA_WIDTH(DATA_WIDTH)
+    ) ram_inst (
+        .clk(clk),
+        .rst(rst),
+        .writeEnable(ramWriteEnable),
+        .readEnable (ramReadEnable),
+        .addr       (ramAddr),
+        .writeData  (ramWriteData),
+        .readData   (ramReadData)
+    );
+
+    // -----------------------------
+    // Instantiate Cache
+    // -----------------------------
+    cache #(
+        .NUM_SETS    (NUM_SETS),
+        .NUM_WAYS    (NUM_WAYS),
+        .TAG_WIDTH   (TAG_WIDTH),
+        .DATA_WIDTH  (DATA_WIDTH),
+        .SET_INDEX_W (SET_INDEX_W),
+        .WAY_INDEX_W (WAY_INDEX_W),
+        // Dirty needed for write-back bonus; safe to keep on even for write-through
+        .USE_DIRTY   (1),
+        .USE_LRU     (1)
+    ) cache_inst (
+        .clk(clk),
+        .rst(rst),
+
+        .rdSet(rdSet),
+        .rdTags(rdTags),
+        .rdData(rdData),
+        .rdValid(rdValid),
+        .rdDirty(rdDirty),
+
+        .lineWriteEn   (lineWriteEn),
+        .lineWriteSet  (lineWriteSet),
+        .lineWriteWay  (lineWriteWay),
+        .lineWriteTag  (lineWriteTag),
+        .lineWriteData (lineWriteData),
+        .lineWriteValid(lineWriteValid),
+        .lineWriteDirty(lineWriteDirty),
+
+        .lruAccessEn (lruAccessEn),
+        .lruAccessSet(lruAccessSet),
+        .lruAccessWay(lruAccessWay),
+
+        .victimSet(victimSet),
+        .victimWay(victimWay)
+    );
+
+    // -----------------------------
+    // Instantiate Controller
+    // -----------------------------
+    cache_controller #(
+        .ADDR_WIDTH  (ADDR_WIDTH),
+        .DATA_WIDTH  (DATA_WIDTH),
+        .NUM_SETS    (NUM_SETS),
+        .NUM_WAYS    (NUM_WAYS),
+        .SET_INDEX_W (SET_INDEX_W),
+        .WAY_INDEX_W (WAY_INDEX_W),
+        .OFFSET_W    (OFFSET_W),
+        .TAG_WIDTH   (TAG_WIDTH),
+        .WRITE_BACK  (WRITE_BACK)
+    ) ctrl_inst (
+        .clk(clk),
+        .rst(rst),
+
+        .cpuRead     (cpuRead),
+        .cpuWrite    (cpuWrite),
+        .cpuAddr     (cpuAddr),
+        .cpuWriteData(cpuWriteData),
+        .cpuReadData (cpuReadData),
+        .done        (done),
+        .ready       (ready),
+
+        .rdSet       (rdSet),
+        .rdTags      (rdTags),
+        .rdData      (rdData),
+        .rdValid     (rdValid),
+        .rdDirty     (rdDirty),
+
+        .lineWriteEn    (lineWriteEn),
+        .lineWriteSet   (lineWriteSet),
+        .lineWriteWay   (lineWriteWay),
+        .lineWriteTag   (lineWriteTag),
+        .lineWriteData  (lineWriteData),
+        .lineWriteValid (lineWriteValid),
+        .lineWriteDirty (lineWriteDirty),
+
+        .lruAccessEn  (lruAccessEn),
+        .lruAccessSet (lruAccessSet),
+        .lruAccessWay (lruAccessWay),
+
+        .victimSet (victimSet),
+        .victimWay (victimWay),
+
+        .ramWriteEnable(ramWriteEnable),
+        .ramReadEnable (ramReadEnable),
+        .ramAddr       (ramAddr),
+        .ramWriteData  (ramWriteData),
+        .ramReadData   (ramReadData)
+    );
+
+endmodule

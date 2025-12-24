@@ -51,86 +51,168 @@ module ram #(
     end
 
 endmodule
-
 /*************************************************
- * CACHE MODULE (4-WAY SET ASSOCIATIVE)
+ * CACHE MODULE (Data + Tag Array + Metadata)
+ *
+ * Supports (via parameters):
+ *  - Direct-mapped:        NUM_WAYS = 1
+ *  - Fully-associative:    NUM_SETS = 1, NUM_WAYS = total lines
+ *  - N-way set associative: any NUM_SETS >= 1, NUM_WAYS >= 1
+ *
+ * Mandatory (per project):
+ *  - Parameterized NUM_SETS, NUM_WAYS, TAG_WIDTH, DATA_WIDTH
+ *
+ * Bonus-ready features INCLUDED (controller may use or ignore):
+ *  - Dirty bit storage (for write-back technique)
+ *  - True LRU metadata + victim selection (for replacement)
+ *************************************************/
+/*************************************************
+ * CACHE MODULE (Verilog-2001 compatible)
  *************************************************/
 module cache #(
-    parameter ADDR_WIDTH = 16,
-    parameter DATA_WIDTH = 32,
-    parameter NUM_SETS   = 64,
-    parameter NUM_WAYS   = 4,
-    parameter INDEX_BITS = (NUM_SETS > 1) ? $clog2(NUM_SETS) : 1,
-    parameter WAY_BITS   = (NUM_WAYS > 1) ? $clog2(NUM_WAYS) : 1,
-    parameter TAG_WIDTH  = ADDR_WIDTH - INDEX_BITS
-)(
-    input clk,
-    input we,
-    input fill,
-    input [INDEX_BITS-1:0] index,
-    input [TAG_WIDTH-1:0]  tag_in,
-    input [DATA_WIDTH-1:0] data_in,
+    parameter integer NUM_SETS     = 64,
+    parameter integer NUM_WAYS     = 4,
+    parameter integer TAG_WIDTH    = 8,
+    parameter integer DATA_WIDTH   = 32,
 
-    output reg [WAY_BITS-1:0] hit_way,   
-    output reg hit,
-    output reg [DATA_WIDTH-1:0] data_out,
-    output reg dirty_out,
-    output reg [TAG_WIDTH-1:0] tag_out
+    // In pure Verilog, you must provide these (no $clog2)
+    parameter integer SET_INDEX_W  = 6, // log2(NUM_SETS)
+    parameter integer WAY_INDEX_W  = 2, // log2(NUM_WAYS)
+
+    // BONUS toggles
+    parameter integer USE_DIRTY    = 1,
+    parameter integer USE_LRU      = 1
+)(
+    input  wire clk,
+    input  wire rst,
+
+    // Read view of one set
+    input  wire [SET_INDEX_W-1:0] rdSet,
+    output wire [NUM_WAYS*TAG_WIDTH-1:0]   rdTags,
+    output wire [NUM_WAYS*DATA_WIDTH-1:0]  rdData,
+    output wire [NUM_WAYS-1:0]             rdValid,
+    output wire [NUM_WAYS-1:0]             rdDirty,
+
+    // Write one way in one set
+    input  wire                       lineWriteEn,
+    input  wire [SET_INDEX_W-1:0]      lineWriteSet,
+    input  wire [WAY_INDEX_W-1:0]      lineWriteWay,
+    input  wire [TAG_WIDTH-1:0]        lineWriteTag,
+    input  wire [DATA_WIDTH-1:0]       lineWriteData,
+    input  wire                       lineWriteValid,
+    input  wire                       lineWriteDirty,
+
+    // LRU update
+    input  wire                       lruAccessEn,
+    input  wire [SET_INDEX_W-1:0]      lruAccessSet,
+    input  wire [WAY_INDEX_W-1:0]      lruAccessWay,
+
+    // Victim selection
+    input  wire [SET_INDEX_W-1:0]      victimSet,
+    output wire [WAY_INDEX_W-1:0]      victimWay
 );
 
-    reg valid [NUM_SETS-1:0][NUM_WAYS-1:0];
-    reg dirty [NUM_SETS-1:0][NUM_WAYS-1:0];
-    reg [TAG_WIDTH-1:0] tag   [NUM_SETS-1:0][NUM_WAYS-1:0];
-    reg [DATA_WIDTH-1:0] data [NUM_SETS-1:0][NUM_WAYS-1:0];
-    reg [WAY_BITS-1:0] lru [NUM_SETS-1:0];
+    // ---------- internal clog2 for LRU width only ----------
+    function integer clog2;
+        input integer value;
+        integer v;
+        begin
+            v = value - 1;
+            for (clog2 = 0; v > 0; clog2 = clog2 + 1)
+                v = v >> 1;
+        end
+    endfunction
 
-    integer i, s;
+    localparam integer LRU_AGE_W = (NUM_WAYS <= 1) ? 1 : clog2(NUM_WAYS);
+    localparam integer NUM_LINES = NUM_SETS * NUM_WAYS;
 
-    initial begin
-        for (s = 0; s < NUM_SETS; s = s + 1) begin
-            lru[s] = 0;
-            for (i = 0; i < NUM_WAYS; i = i + 1) begin
-                valid[s][i] = 0;
-                dirty[s][i] = 0;
+    function integer line_index;
+        input integer set_i;
+        input integer way_i;
+        begin
+            line_index = (set_i * NUM_WAYS) + way_i;
+        end
+    endfunction
+
+    reg [TAG_WIDTH-1:0]    tag_mem     [0:NUM_LINES-1];
+    reg [DATA_WIDTH-1:0]   data_mem    [0:NUM_LINES-1];
+    reg                    valid_mem   [0:NUM_LINES-1];
+    reg                    dirty_mem   [0:NUM_LINES-1];
+    reg [LRU_AGE_W-1:0]    lru_age_mem [0:NUM_LINES-1];
+
+    integer s, w;
+    integer old_age;   // moved out of always block (Verilog-legal)
+
+    // ---------- sequential: reset, writes, LRU updates ----------
+    always @(posedge clk) begin
+        if (rst) begin
+            for (s = 0; s < NUM_SETS; s = s + 1) begin
+                for (w = 0; w < NUM_WAYS; w = w + 1) begin
+                    valid_mem[line_index(s,w)]   <= 1'b0;
+                    dirty_mem[line_index(s,w)]   <= 1'b0;
+                    lru_age_mem[line_index(s,w)] <= w[LRU_AGE_W-1:0];
+                    tag_mem[line_index(s,w)]     <= {TAG_WIDTH{1'b0}};
+                    data_mem[line_index(s,w)]    <= {DATA_WIDTH{1'b0}};
+                end
+            end
+        end else begin
+            if (lineWriteEn) begin
+                tag_mem  [line_index(lineWriteSet, lineWriteWay)] <= lineWriteTag;
+                data_mem [line_index(lineWriteSet, lineWriteWay)] <= lineWriteData;
+                valid_mem[line_index(lineWriteSet, lineWriteWay)] <= lineWriteValid;
+
+                if (USE_DIRTY)
+                    dirty_mem[line_index(lineWriteSet, lineWriteWay)] <= lineWriteDirty;
+                else
+                    dirty_mem[line_index(lineWriteSet, lineWriteWay)] <= 1'b0;
+            end
+
+            if (USE_LRU && lruAccessEn) begin
+                old_age = lru_age_mem[line_index(lruAccessSet, lruAccessWay)];
+
+                for (w = 0; w < NUM_WAYS; w = w + 1) begin
+                    if (lruAccessWay == w[WAY_INDEX_W-1:0]) begin
+                        lru_age_mem[line_index(lruAccessSet, w)] <= {LRU_AGE_W{1'b0}}; // MRU
+                    end else begin
+                        if (lru_age_mem[line_index(lruAccessSet, w)] < old_age[LRU_AGE_W-1:0])
+                            lru_age_mem[line_index(lruAccessSet, w)] <= lru_age_mem[line_index(lruAccessSet, w)] + 1'b1;
+                    end
+                end
             end
         end
     end
+
+    // ---------- combinational: expose whole set ----------
+    genvar gw;
+    generate
+        for (gw = 0; gw < NUM_WAYS; gw = gw + 1) begin : GEN_RD
+            assign rdTags[(gw+1)*TAG_WIDTH-1 : gw*TAG_WIDTH]   = tag_mem [(rdSet * NUM_WAYS) + gw];
+            assign rdData[(gw+1)*DATA_WIDTH-1 : gw*DATA_WIDTH] = data_mem[(rdSet * NUM_WAYS) + gw];
+            assign rdValid[gw] = valid_mem[(rdSet * NUM_WAYS) + gw];
+            assign rdDirty[gw] = (USE_DIRTY) ? dirty_mem[(rdSet * NUM_WAYS) + gw] : 1'b0;
+        end
+    endgenerate
+
+    // ---------- combinational: victim way from LRU ----------
+    reg [WAY_INDEX_W-1:0] victimWay_r;
+    integer vw;
+    integer best_age;
 
     always @(*) begin
+        victimWay_r = {WAY_INDEX_W{1'b0}};
 
-        hit = 0;
-        data_out = 0;
-        hit_way = 0;
-        dirty_out = 0;
-        tag_out = 0;
-
-        for (i = 0; i < NUM_WAYS; i = i + 1) begin
-            if (valid[index][i] && tag[index][i] == tag_in) begin
-                hit = 1;
-                hit_way = i;
-                data_out = data[index][i];
-                dirty_out = dirty[index][i];
-                tag_out = tag[index][i];
+        if (USE_LRU) begin
+            best_age = -1;
+            for (vw = 0; vw < NUM_WAYS; vw = vw + 1) begin
+                if (lru_age_mem[line_index(victimSet, vw)] > best_age) begin
+                    best_age    = lru_age_mem[line_index(victimSet, vw)];
+                    victimWay_r = vw[WAY_INDEX_W-1:0];
+                end
             end
         end
     end
 
-    always @(posedge clk) begin
-        if (hit) begin
-            if (we) begin
-                data[index][hit_way] <= data_in;
-                dirty[index][hit_way] <= 1'b1;
-            end
-            lru[index] <= (hit_way == NUM_WAYS-1) ? 0 : hit_way + 1'b1;
-        end
-        else if (fill) begin
-            valid[index][lru[index]] <= 1'b1;
-            tag[index][lru[index]]   <= tag_in;
-            data[index][lru[index]]  <= data_in;
-            dirty[index][lru[index]] <= we;
-            lru[index] <= (lru[index] == NUM_WAYS-1) ? 0 : lru[index] + 1'b1;
-        end
-    end
+    assign victimWay = victimWay_r;
 
 endmodule
 

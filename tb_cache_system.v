@@ -216,51 +216,51 @@ module tb_cache_system;
 
         // Bonus WB Logic (Only runs if enabled)
         if (TEST_WRITE_BACK == 1) begin
-    $display("[TEST WB1] ========  Write-Back: Write doesn't update RAM immediately ========");
-    ram_preload(16'h0005, 32'hC1EA_0000);
-    cpu_read_check(16'h0005, 32'hC1EA_0000, 0);
-    cpu_write(16'h0005, 32'hD157_0000);
+            $display("[TEST WB1] ========  Write-Back: Write doesn't update RAM immediately ========");
+            ram_preload(16'h0005, 32'hC1EA_0000);
+            cpu_read_check(16'h0005, 32'hC1EA_0000, 0);
+            cpu_write(16'h0005, 32'hD157_0000);
 
-    // Verify RAM not updated
-    if (dut.ram_inst.mem[16'h0005] !== 32'hD157_0000) begin
-        $display("[PASS WB1] RAM not updated → Write-Back Active");
-    end else begin
-        $display("[FAIL WB1] RAM updated immediately → Should be WB!");
-        error_count = error_count + 1;
-    end
+            // Verify RAM not updated
+            if (dut.ram_inst.mem[16'h0005] !== 32'hD157_0000) begin
+                $display("[PASS WB1] RAM not updated → Write-Back Active");
+            end else begin
+                $display("[FAIL WB1] RAM updated immediately → Should be WB!");
+                error_count = error_count + 1;
+            end
 
-    $display("[TEST WB2] ========  Write-Back: Force eviction to trigger write-back ========");
-    // Preload other entries in same set (set = bits [5:0] of addr)
-    ram_preload(16'h0045, 32'hBEEF_0001);
-    ram_preload(16'h0085, 32'hBEEF_0002);
-    ram_preload(16'h00C5, 32'hBEEF_0003);
+            $display("[TEST WB2] ========  Write-Back: Force eviction to trigger write-back ========");
+            // Preload other entries in same set (set = bits [5:0] of addr)
+            ram_preload(16'h0045, 32'hBEEF_0001);
+            ram_preload(16'h0085, 32'hBEEF_0002);
+            ram_preload(16'h00C5, 32'hBEEF_0003);
 
-    // Load them into cache
-    cpu_read_check(16'h0045, 32'hBEEF_0001, 0);  // Fill
-    cpu_read_check(16'h0085, 32'hBEEF_0002, 0);
-    cpu_read_check(16'h00C5, 32'hBEEF_0003, 0);
+            // Load them into cache
+            cpu_read_check(16'h0045, 32'hBEEF_0001, 0);  
+            cpu_read_check(16'h0085, 32'hBEEF_0002, 0);
+            cpu_read_check(16'h00C5, 32'hBEEF_0003, 0);
 
-    // Make them "recent" so 0x0005 becomes LRU
-    cpu_read_check(16'h0045, 32'hBEEF_0001, 1);
-    cpu_read_check(16'h0085, 32'hBEEF_0002, 1);
-    cpu_read_check(16'h00C5, 32'hBEEF_0003, 1);
+            // Make them recent so 0x0005 becomes LRU
+            cpu_read_check(16'h0045, 32'hBEEF_0001, 1);
+            cpu_read_check(16'h0085, 32'hBEEF_0002, 1);
+            cpu_read_check(16'h00C5, 32'hBEEF_0003, 1);
 
-    // Now access new line in same set → forces eviction
-    ram_preload(16'h0105, 32'hDEAD_0000);  // Preload RAM
-    cpu_read_check(16'h0105, 32'hDEAD_0000, 0);  // Miss → should evict 0x0005, WB to RAM
+            // Now access new line in same set to force eviction
+            ram_preload(16'h0105, 32'hDEAD_0000);  // Preload RAM
+            cpu_read_check(16'h0105, 32'hDEAD_0000, 0);  // Miss → should evict 0x0005, WB to RAM
 
-    // Now RAM[0x0005] should have been updated
-    check_ram_content(16'h0005, 32'hD157_0000);
+            // Now RAM[0x0005] should have been updated
+            check_ram_content(16'h0005, 32'hD157_0000);
 
-    $display("[TEST WB3] ========  Write-Alloc + WB: Write to uncached addr ========");
-    cpu_write(16'h0200, 32'hA110_CA7E);
-    if (dut.ram_inst.mem[16'h0200] === 32'hA110_CA7E) begin
-        $display("[FAIL WB3] RAM updated on WB write-alloc");
-        error_count = error_count + 1;
-    end else begin
-        $display("[PASS WB3] RAM not updated → WB working");
-    end
-end
+            $display("[TEST WB3] ========  Write-Alloc + WB: Write to uncached addr ========");
+            cpu_write(16'h0200, 32'hA110_CA7E);
+            if (dut.ram_inst.mem[16'h0200] === 32'hA110_CA7E) begin
+                $display("[FAIL WB3] RAM updated on WB write-alloc");
+                error_count = error_count + 1;
+            end else begin
+                $display("[PASS WB3] RAM not updated → WB working");
+            end
+        end
 
         $display("\n============================================================");
         if (error_count == 0) $display("  ALL TESTS PASSED");

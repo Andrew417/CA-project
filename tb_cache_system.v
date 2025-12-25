@@ -1,10 +1,4 @@
-`timescale 1ns / 1ps
-
 module tb_cache_system;
-
-    // ==============================================================================
-    // PARAMETERS & CONFIGURATION
-    // ==============================================================================
     localparam integer TEST_WRITE_BACK = 0; // 0 for WT, 1 for WB
 
     parameter integer ADDR_WIDTH   = 16;
@@ -15,32 +9,21 @@ module tb_cache_system;
     parameter integer SET_INDEX_W  = 6;
     parameter integer TAG_WIDTH    = 10;
 
-    // ==============================================================================
-    // SIGNALS
-    // ==============================================================================
-    reg                   clk;
-    reg                   rst;
-    reg                   cpuRead;
-    reg                   cpuWrite;
+    reg clk;
+    reg rst;
+    reg cpuRead;
+    reg cpuWrite;
     reg  [ADDR_WIDTH-1:0] cpuAddr;
     reg  [DATA_WIDTH-1:0] cpuWriteData;
     wire [DATA_WIDTH-1:0] cpuReadData;
-    wire                  done;
-    wire                  ready;
+    wire done;
+    wire ready;
 
-    integer start_time;
-    integer latency;
-    integer error_count = 0;
-    integer correct_count = 0;
-    integer test_num = 0;
-    integer cycle_count = 0;
+    integer error_count = 0 ,correct_count = 0 ,test_num = 0;
     
-    // Waveform helper
+    // expected values
     reg [DATA_WIDTH-1:0] rdata_expected;
 
-    // ==============================================================================
-    // INSTANCE
-    // ==============================================================================
     cache_system #(
         .ADDR_WIDTH  (ADDR_WIDTH),
         .DATA_WIDTH  (DATA_WIDTH),
@@ -62,124 +45,119 @@ module tb_cache_system;
         .ready        (ready)
     );
 
-    // ==============================================================================
-    // CLOCK
-    // ==============================================================================
     initial begin
         clk = 0;
         forever #5 clk = ~clk;
     end
 
-    always @(posedge clk) cycle_count = cycle_count + 1;
-
-    // ==============================================================================
-    // TASKS
-    // ==============================================================================
-    task sys_reset;
-    begin
-        test_num = 0;
-        rst = 1;
-        cpuRead = 0; cpuWrite = 0; cpuAddr = 0; cpuWriteData = 0; rdata_expected = 0;
-        repeat(5) @(posedge clk);
-        rst = 0;
-        @(posedge clk);
-        $display("[INFO] System Reset Complete");
-    end
+    task reset;
+        begin
+            test_num = 0;
+            rst = 1;
+            cpuRead = 0; cpuWrite = 0; cpuAddr = 0; cpuWriteData = 0; rdata_expected = 0;
+            repeat(5) @(posedge clk);
+            rst = 0;
+            @(posedge clk);
+            $display("[INFO] System Reset Complete");
+        end
     endtask
 
     task cpu_read_check;
         input [ADDR_WIDTH-1:0] addr;
         input [DATA_WIDTH-1:0] expected_data;
         input is_hit_expected; 
-    begin
-        test_num = test_num + 1;
-        rdata_expected = expected_data;
+        begin
+            test_num = test_num + 1;
+            rdata_expected = expected_data;
 
-        wait(ready);
-        @(posedge clk);
+            while (!ready) @(posedge clk);
+            @(posedge clk);
 
-        start_time = cycle_count;
-        cpuRead = 1;
-        cpuAddr = addr;
-        
-        @(posedge clk);
-        while(!done) @(posedge clk);
+            cpuRead = 1;
+            cpuAddr = addr;
+            
+            @(posedge clk);
+            while(!done) @(posedge clk);
 
-        latency = cycle_count - start_time;
-        cpuRead = 0; cpuAddr = 0;
+            cpuRead = 0; cpuAddr = 0;
 
-        if (cpuReadData !== expected_data) begin
-            $display("[FAIL TC%0d] Addr: 0x%h | Exp: 0x%h | Got: 0x%h", test_num, addr, expected_data, cpuReadData);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS TC%0d] Addr: 0x%h | Data: 0x%h | Lat: %0d", test_num, addr, cpuReadData, latency);
-            correct_count = correct_count + 1;
+            if (cpuReadData !== expected_data) begin
+                $display("[FAIL TC%0d] Addr: 0x%h | Exp: 0x%h | Got: 0x%h", test_num, addr, expected_data, cpuReadData);
+                error_count = error_count + 1;
+            end else begin
+                $display("[PASS TC%0d] Addr: 0x%h | Data: 0x%h ", test_num, addr, cpuReadData);
+                correct_count = correct_count + 1;
+            end
+            @(posedge clk);
         end
-        @(posedge clk);
-    end
     endtask
 
     task cpu_write;
         input [ADDR_WIDTH-1:0] addr;
         input [DATA_WIDTH-1:0] data;
-    begin
-        test_num = test_num + 1;
-        wait(ready);
-        @(posedge clk);
+        begin
+            test_num = test_num + 1;
+            while (!ready) @(posedge clk);
+            @(posedge clk);
         
-        cpuWrite = 1;
-        cpuAddr = addr;
-        cpuWriteData = data;
+            cpuWrite = 1;
+            cpuAddr = addr;
+            cpuWriteData = data;
 
-        @(posedge clk);
-        while(!done) @(posedge clk);
+            @(posedge clk);
+            while(!done) @(posedge clk);
 
-        cpuWrite = 0; cpuAddr = 0; cpuWriteData = 0;
-        $display("[INFO TC%0d] Write Addr: 0x%h | Data: 0x%h", test_num, addr, data);
-        @(posedge clk);
-    end
+            cpuWrite = 0; cpuAddr = 0; cpuWriteData = 0;
+            $display("[INFO TC%0d] Write Addr: 0x%h | Data: 0x%h", test_num, addr, data);
+            @(posedge clk);
+        end
     endtask
 
     task ram_preload;
         input [ADDR_WIDTH-1:0] addr;
         input [DATA_WIDTH-1:0] data;
-    begin
-        dut.ram_inst.mem[addr] = data;
-    end
+        begin
+            dut.ram_inst.mem[addr] = data;
+        end
     endtask
 
     task check_ram_content;
         input [ADDR_WIDTH-1:0] addr;
         input [DATA_WIDTH-1:0] exp_data;
-    begin
-        if (dut.ram_inst.mem[addr] !== exp_data) begin
-            $display("[FAIL RAM] Addr: 0x%h | Exp: 0x%h | Got: 0x%h", addr, exp_data, dut.ram_inst.mem[addr]);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS RAM] Addr: 0x%h | Match: 0x%h", addr, exp_data);
+        begin
+            if (dut.ram_inst.mem[addr] !== exp_data) begin
+                $display("[FAIL RAM] Addr: 0x%h | Exp: 0x%h | Got: 0x%h", addr, exp_data, dut.ram_inst.mem[addr]);
+                error_count = error_count + 1;
+            end else begin
+                $display("[PASS RAM] Addr: 0x%h | Match: 0x%h", addr, exp_data);
+            end
         end
-    end
     endtask
-
-    // ==============================================================================
-    // MAIN
-    // ==============================================================================
+    
+    // ================================= MAIN =============================================
     initial begin
         $display("============================================================");
         $display(" STARTING CACHE SYSTEM TESTBENCH");
         $display("============================================================");
 
-        sys_reset();
+        reset();
 
-        // T1 & T2: Cold Read Miss
+        // T1: Cold Read Miss (first access)
+        $display("[TEST T1] ========  Cold Read Miss: preload RAM[0x0010]=DEAD_BEEF then READ 0x0010 (expect miss, fill) ========");
         ram_preload(16'h0010, 32'hDEAD_BEEF);
-        cpu_read_check(16'h0010, 32'hDEAD_BEEF, 0); 
+        cpu_read_check(16'h0010, 32'hDEAD_BEEF, 0);
+
+        // T2: Cold Read Miss (repeat)
+        $display("[TEST T2] ========  Cold Read Miss (repeat): access same address to confirm behavior ========");
+        cpu_read_check(16'h0010, 32'hDEAD_BEEF, 1);
 
         // T3: Read Hit
+        $display("[TEST T3] ========  Read Hit: verify hit detection after line fill ========");
         cpu_read_check(16'h0010, 32'hDEAD_BEEF, 1);
 
         // T4: Write Hit (WT)
         if (TEST_WRITE_BACK == 0) begin
+            $display("[TEST T4] ========  Write Hit (WT): write to cached address and verify RAM updated immediately ========");
             cpu_write(16'h0010, 32'hCAFE_BABE);
             check_ram_content(16'h0010, 32'hCAFE_BABE);
             cpu_read_check(16'h0010, 32'hCAFE_BABE, 1);
@@ -187,17 +165,20 @@ module tb_cache_system;
 
         // T5: Write Miss
         if (TEST_WRITE_BACK == 0) begin
+            $display("[TEST T5] ========  Write Miss (Write-Allocate + WT): write to uncached address, expect allocation and RAM update ========");
             cpu_write(16'h0020, 32'hAAAA_5555);
             check_ram_content(16'h0020, 32'hAAAA_5555);
             cpu_read_check(16'h0020, 32'hAAAA_5555, 1);
         end
 
         // T6: Different Sets
+        $display("[TEST T6] ========  Different Sets: preload/read 0x0011 then read 0x0010 to verify independent sets ========");
         ram_preload(16'h0011, 32'h1111_2222);
-        cpu_read_check(16'h0011, 32'h1111_2222, 0); 
-        cpu_read_check(16'h0010, 32'hCAFE_BABE, 1); 
+        cpu_read_check(16'h0011, 32'h1111_2222, 0);
+        cpu_read_check(16'h0010, 32'hCAFE_BABE, 1);
 
         // T7: Set Fill
+        $display("[TEST T7] ========  Set Fill: fill all ways in one set with 0x0003,0x0043,0x0083,0x00C3 then verify hits ========");
         ram_preload(16'h0003, 32'hA0A0_A0A0);
         ram_preload(16'h0043, 32'hB0B0_B0B0);
         ram_preload(16'h0083, 32'hC0C0_C0C0);
@@ -209,7 +190,8 @@ module tb_cache_system;
         cpu_read_check(16'h00C3, 32'hD0D0_D0D0, 0);
         cpu_read_check(16'h0003, 32'hA0A0_A0A0, 1);
 
-        // T8: Replacement
+        // T8: Replacement (LRU)
+        $display("[TEST T8] ========  LRU Replacement: touch ways then access new line to force eviction ========");
         cpu_read_check(16'h0043, 32'hB0B0_B0B0, 1);
         cpu_read_check(16'h0083, 32'hC0C0_C0C0, 1);
         cpu_read_check(16'h00C3, 32'hD0D0_D0D0, 1);
@@ -217,24 +199,27 @@ module tb_cache_system;
         cpu_read_check(16'h0103, 32'hE0E0_E0E0, 0);
         cpu_read_check(16'h0003, 32'hA0A0_A0A0, 0);
 
-        // T9: RAW
+        // T9: RAW (Read After Write)
+        $display("[TEST T9] ========  Read-After-Write (RAW): write then immediately read same address ==========");
         cpu_write(16'h0100, 32'h9999_8888);
         cpu_read_check(16'h0100, 32'h9999_8888, 1);
 
-        // T11: Limits
+        // T11: Address Boundary
+        $display("[TEST T11] ========  Address Boundary: verify max address handling with 0xFFFF ========");
         ram_preload(16'hFFFF, 32'hFFFF_FFFF);
         cpu_read_check(16'hFFFF, 32'hFFFF_FFFF, 0);
 
         // Bonus WB Logic (Only runs if enabled)
         if (TEST_WRITE_BACK == 1) begin
-             ram_preload(16'h0005, 32'hC1EA_0000); 
-             cpu_read_check(16'h0005, 32'hC1EA_0000, 0); 
-             cpu_write(16'h0005, 32'hD157_0000);         
+             $display("[TEST WB] ========  Write-Back Tests: dirty bit, eviction write-back, write-allocate behavior ========");
+             ram_preload(16'h0005, 32'hC1EA_0000);
+             cpu_read_check(16'h0005, 32'hC1EA_0000, 0);
+             cpu_write(16'h0005, 32'hD157_0000);
              
              if (dut.ram_inst.mem[16'h0005] !== 32'hD157_0000) $display("[PASS] Write-Back Verified");
-             else begin 
-                $display("[FAIL] RAM updated immediately"); 
-                error_count = error_count + 1; 
+             else begin
+                $display("[FAIL] RAM updated immediately");
+                error_count = error_count + 1;
              end
 
              cpu_read_check(16'h0045, 32'h0, 0);
@@ -248,11 +233,12 @@ module tb_cache_system;
 
              cpu_write(16'h0200, 32'hA110_CA7E);
              if (dut.ram_inst.mem[16'h0200] !== 32'hA110_CA7E) $display("[PASS] Alloc Dirty Verified");
-             else begin 
-                $display("[FAIL] Alloc updated RAM"); 
-                error_count = error_count + 1; 
+             else begin
+                $display("[FAIL] Alloc updated RAM");
+                error_count = error_count + 1;
              end
         end else begin
+            $display("[TEST WT] ========  Write-Through Final Test: simple WT write and RAM check ========");
             cpu_write(16'h0300, 32'hC4EC_0001);
             check_ram_content(16'h0300, 32'hC4EC_0001);
         end

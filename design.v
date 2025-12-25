@@ -1,6 +1,4 @@
-/*************************************************
- * RAM MODULE
- *************************************************/
+// =========== RAM MODULE ===========
 module ram #(
     parameter ADDR_WIDTH = 16,
     parameter DATA_WIDTH = 32
@@ -34,9 +32,7 @@ module ram #(
     end
 endmodule
 
-/*************************************************
- * CACHE MODULE
- *************************************************/
+// =========== CACHE MODULE ===========
 module cache #(
     parameter integer NUM_SETS     = 64,
     parameter integer NUM_WAYS     = 4,
@@ -91,7 +87,7 @@ module cache #(
     reg                    dirty_mem   [0:NUM_LINES-1];
     reg [LRU_AGE_W-1:0]    lru_age_mem [0:NUM_LINES-1];
 
-    // Helper for indexing
+    // idx helper
     function integer get_idx;
         input integer s_idx;
         input integer w_idx;
@@ -100,7 +96,7 @@ module cache #(
         end
     endfunction
 
-    // --- SEQUENTIAL LOGIC ---
+    // seq logic
     integer s, w;
     integer old_age;
     integer wr_idx;
@@ -118,7 +114,7 @@ module cache #(
                 end
             end
         end else begin
-            // Write
+            // write
             if (lineWriteEn) begin
                 wr_idx = get_idx(lineWriteSet, lineWriteWay);
                 tag_mem  [wr_idx] <= lineWriteTag;
@@ -128,7 +124,7 @@ module cache #(
                 else           dirty_mem[wr_idx] <= 1'b0;
             end
 
-            // LRU Update
+            // lru update
             if (USE_LRU && lruAccessEn) begin
                 lru_idx = get_idx(lruAccessSet, lruAccessWay);
                 old_age = lru_age_mem[lru_idx];
@@ -144,7 +140,7 @@ module cache #(
         end
     end
 
-    // --- COMBINATIONAL READ ---
+    // comb read
     genvar gw;
     generate
         for (gw = 0; gw < NUM_WAYS; gw = gw + 1) begin : GEN_RD
@@ -155,7 +151,7 @@ module cache #(
         end
     endgenerate
 
-    // --- VICTIM SELECTION ---
+    // choose victim
     reg [WAY_INDEX_W-1:0] victimWay_r;
     integer vw;
     integer best_age;
@@ -175,9 +171,7 @@ module cache #(
 
 endmodule
 
-/*************************************************
- * CACHE CONTROLLER
- *************************************************/
+// =========== CACHE CONTROLLER MODULE ===========
 module cache_controller #(
     parameter integer ADDR_WIDTH   = 16,
     parameter integer DATA_WIDTH   = 32,
@@ -241,7 +235,7 @@ module cache_controller #(
     wire [SET_INDEX_W-1:0] reqSet = reqAddr[OFFSET_W + SET_INDEX_W - 1 : OFFSET_W];
     wire [TAG_WIDTH-1:0]   reqTag = reqAddr[ADDR_WIDTH-1 : OFFSET_W + SET_INDEX_W];
 
-    // Helper functions
+    // helper fns
     function [TAG_WIDTH-1:0] GET_TAG_I;
         input integer wi;
         begin
@@ -255,7 +249,7 @@ module cache_controller #(
         end
     endfunction
 
-    // Hit Logic
+    // hit logic
     integer i;
     reg hit;
     reg [WAY_INDEX_W-1:0] hitWay;
@@ -287,7 +281,7 @@ module cache_controller #(
 
     wire victim_need_wb = (WRITE_BACK != 0) && rdValid[replWay_c] && rdDirty[replWay_c];
 
-    // Snapshot regs
+    // snapshot regs
     reg [WAY_INDEX_W-1:0] replWay_r;
     reg [TAG_WIDTH-1:0]   victimTag_r;
     reg [DATA_WIDTH-1:0]  victimData_r;
@@ -357,7 +351,7 @@ module cache_controller #(
         endcase
     end
 
-    // Outputs
+    // outputs
     always @(*) begin
         // Default Cache inputs
         rdSet = reqSet;
@@ -426,6 +420,8 @@ module cache_controller #(
 
 endmodule
 
+
+// ========= top module ==========
 module cache_system #(
     parameter integer ADDR_WIDTH   = 16,
     parameter integer DATA_WIDTH   = 32,
